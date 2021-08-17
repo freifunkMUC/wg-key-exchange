@@ -32,11 +32,19 @@ def connect(domains: List[str]) -> None:
         domains: The domains to connect to.
     """
     broker_address = fetch_from_config("mqtt").get("broker_url")
+    broker_port = fetch_from_config("mqtt").get("broker_port")
+    broker_username = fetch_from_config("mqtt").get("username")
+    broker_password = fetch_from_config("mqtt").get("password")
+    use_tls = fetch_from_config("mqtt").get("tls")
+    broker_keepalive = fetch_from_config("mqtt").get("keepalive")
     # TODO(ruairi): Move the hostname to a global variable.
     client = mqtt.Client(socket.gethostname())
     client.on_message = on_message
+    client.username_pw_set(broker_username, broker_password)
     print(f"connecting to broker {broker_address}")
-    client.connect(broker_address)
+    if use_tls:
+        client.tls_set()
+    client.connect(broker_address, port=broker_port, keepalive=broker_keepalive)
     for domain in domains:
         topic = f"wireguard/{domain}/+"
         print(f"Subscribing to topic {topic}")
@@ -53,7 +61,7 @@ def on_message(client: mqtt.Client, userdata: Any, message: mqtt.MQTTMessage) ->
         message: The MQTT message.
     """
     # TODO(ruairi): Check bounds and raise exception here.
-    domain = re.search(r"/.*ffmuc_(\w+)/", message.topic).group(1)
+    domain = re.search(r"^wireguard\/ff(\w+)\/", message.topic).group(1)
     client = WireGuardClient(
         public_key=str(message.payload.decode("utf-8")),
         domain=domain,

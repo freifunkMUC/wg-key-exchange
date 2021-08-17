@@ -47,14 +47,31 @@ class WireGuardClient:
         )
 
     @property
+    def old_lladdr(self) -> str:
+        """Compute the X for an (IPv6) Link-Local address.
+
+        Returns:
+            IPv6 Link-Local address of the WireGuard peer.
+        """
+        pub_key_hash = hashlib.md5()
+        pub_key_hash.update(self.public_key.encode("ascii") + b"\n")
+        hashed_key = pub_key_hash.hexdigest()
+        hash_as_list = wrap(hashed_key, 2)
+        current_mac_addr = ":".join(["00"] + hash_as_list[:5])
+
+        return re.sub(
+            r"/\d+$", "/128", mac2eui64(mac=current_mac_addr, prefix="fe80::/10")
+        )
+
+    @property
     def vx_interface(self) -> str:
         """Returns the name of the VxLAN interface associated with this lladdr."""
-        return f"vx-{self.domain}"
+        return f"vx{self.domain}"
 
     @property
     def wg_interface(self) -> str:
         """Returns the WireGuard peer interface."""
-        return f"wg-{self.domain}"
+        return f"wg{self.domain}"
 
 
 def wg_flush_stale_peers(domain: str) -> List[Dict]:
@@ -67,7 +84,7 @@ def wg_flush_stale_peers(domain: str) -> List[Dict]:
         The peers which we can remove.
     """
     stale_clients = [
-        stale_client for stale_client in find_stale_wireguard_clients("wg-" + domain)
+        stale_client for stale_client in find_stale_wireguard_clients("wg" + domain)
     ]
     stale_wireguard_clients = [
         WireGuardClient(public_key=stale_client, domain=domain, remove=True)
@@ -115,6 +132,12 @@ def bridge_fdb_handler(client: WireGuardClient) -> Dict:
     """
     # TODO(ruairi): Splice this into an add_ and remove_ function.
     with pyroute2.IPRoute() as ip:
+        ip.fdb(
+            "del" if client.remove else "append",
+            ifindex=ip.link_lookup(ifname=client.vx_interface)[0],
+            lladdr="00:00:00:00:00:00",
+            dst=re.sub(r"/\d+$", "", client.old_lladdr),
+        )
         return ip.fdb(
             "del" if client.remove else "append",
             ifindex=ip.link_lookup(ifname=client.vx_interface)[0],
@@ -139,7 +162,7 @@ def update_wireguard_peer(client: WireGuardClient) -> Dict:
         wg_peer = {
             "public_key": client.public_key,
             "persistent_keepalive": _PERSISTENT_KEEPALIVE_SECONDS,
-            "allowed_ips": [client.lladdr],
+            "allowed_ips": [client.lladdr, client.old_lladdr],
             "remove": client.remove,
         }
         return wg.set(client.wg_interface, peer=wg_peer)
@@ -159,6 +182,11 @@ def route_handler(client: WireGuardClient) -> Dict:
     # TODO(ruairi): Determine what Exceptions are raised by ip.route
     # TODO(ruairi): Splice this into an add_ and remove_ function.
     with pyroute2.IPRoute() as ip:
+        ip.route(
+            "del" if client.remove else "add",
+            dst=client.old_lladdr,
+            oif=ip.link_lookup(ifname=client.wg_interface)[0],
+        )
         return ip.route(
             "del" if client.remove else "add",
             dst=client.lladdr,
@@ -182,11 +210,11 @@ def find_stale_wireguard_clients(wg_interface: str) -> List:
         clients = []
         infos = wg.info(wg_interface)
         for info in infos:
-            clients.extend(info.WGDEVICE_A_PEERS.value)
+            clients.extend(info.get_attr('WGDEVICE_A_PEERS'))
         ret = [
-            client.WGPEER_A_PUBLIC_KEY.get("value", "").decode("utf-8")
+            client.get_attr('WGPEER_A_PUBLIC_KEY').decode("utf-8")
             for client in clients
-            if client.WGPEER_A_LAST_HANDSHAKE_TIME.get("tv_sec", int())
+            if client.get_attr('WGPEER_A_LAST_HANDSHAKE_TIME').get("tv_sec", int())
             < three_hrs_in_secs
         ]
         return ret
